@@ -30,6 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
+import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
@@ -76,6 +77,7 @@ class MainViewModel(
     private var locationSyncJob: Job? = null
     private var autoRouteJob: Job? = null
     private var continuousScanJob: Job? = null
+    private var liveFixedLocationJob: Job? = null
 
     init {
         initialize()
@@ -484,6 +486,10 @@ class MainViewModel(
             _uiState.update { it.copy(latitudeInput = value, showCoordinateError = false) }
             evaluateMockCapabilities()
         }
+    }
+
+    fun selectFixedLocation(lat: Double, lng: Double) {
+        updateSelectedLocation(lat, lng)
     }
 
     private fun isValidCoord(value: String): Boolean {
@@ -912,6 +918,8 @@ class MainViewModel(
 
     fun stopSpoofing() {
         settingsRepository.isSpoofingActive = false
+        liveFixedLocationJob?.cancel()
+        liveFixedLocationJob = null
         locationSyncJob?.cancel()
         locationSyncJob = null
         autoRouteJob?.cancel()
@@ -1043,15 +1051,7 @@ class MainViewModel(
 
     /** 首页地图确认选点 */
     fun confirmMapPoint(lat: Double, lng: Double) {
-        _uiState.update {
-            it.copy(
-                latitudeInput = String.format("%.6f", lat),
-                longitudeInput = String.format("%.6f", lng),
-                mapConfirmedPoint = Pair(lat, lng),
-                showCoordinateError = false
-            )
-        }
-        evaluateMockCapabilities()
+        updateSelectedLocation(lat, lng, mapPoint = Pair(lat, lng))
     }
 
     /** 清除地图选点状态 */
@@ -1211,6 +1211,8 @@ class MainViewModel(
         locationSyncJob = null
         autoRouteJob?.cancel()
         autoRouteJob = null
+        liveFixedLocationJob?.cancel()
+        liveFixedLocationJob = null
         viewModelScope.launch {
             locationRepository.stopSpoofing(context)
             _uiState.update {
@@ -1236,6 +1238,7 @@ class MainViewModel(
 
     fun loadSavedLocation(loc: SavedLocation) {
         val wifiCount = try { org.json.JSONArray(loc.wifiJson).length() } catch(e: Exception) { 0 }
+        val cellCount = try { org.json.JSONArray(loc.cellJson).length() } catch(e: Exception) { 0 }
         _uiState.update { 
             it.copy(
                 latitudeInput = String.format("%.6f", loc.lat),
@@ -1243,9 +1246,12 @@ class MainViewModel(
                 collectedWifiJson = loc.wifiJson,
                 collectedCellJson = loc.cellJson,
                 wifiApCount = wifiCount,
-                wifiLoadStatus = if (wifiCount > 0) com.suseoaa.locationspoofer.data.model.WifiLoadStatus.DONE else com.suseoaa.locationspoofer.data.model.WifiLoadStatus.IDLE
+                wifiLoadStatus = if (wifiCount > 0) com.suseoaa.locationspoofer.data.model.WifiLoadStatus.DONE else com.suseoaa.locationspoofer.data.model.WifiLoadStatus.IDLE,
+                canMockWifi = wifiCount > 0,
+                canMockCell = cellCount > 0
             ) 
         }
+        syncLiveFixedLocation(loc.lat, loc.lng, loc.wifiJson, loc.cellJson, _uiState.value.collectedBluetoothJson)
     }
 
     fun removeSavedLocation(location: SavedLocation) {
@@ -1434,6 +1440,82 @@ class MainViewModel(
                     )
                 }
             }
+        }
+    }
+
+    private fun updateSelectedLocation(
+        lat: Double,
+        lng: Double,
+        mapPoint: Pair<Double, Double>? = null
+    ) {
+        if (lng !in -180.0..180.0 || lat !in -90.0..90.0) {
+            _uiState.update { it.copy(showCoordinateError = true) }
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                latitudeInput = String.format(Locale.US, "%.6f", lat),
+                longitudeInput = String.format(Locale.US, "%.6f", lng),
+                mapConfirmedPoint = mapPoint ?: it.mapConfirmedPoint,
+                showCoordinateError = false
+            )
+        }
+
+        if (isFixedSpoofingActive()) {
+            syncLiveFixedLocation(lat, lng)
+        } else {
+            evaluateMockCapabilities()
+        }
+    }
+
+    private fun isFixedSpoofingActive(): Boolean {
+        val state = _uiState.value
+        return state.isSpoofingActive && state.routePlanStage != RoutePlanStage.RUNNING
+    }
+
+    private fun syncLiveFixedLocation(
+        lat: Double,
+        lng: Double,
+        wifiJsonOverride: String? = null,
+        cellJsonOverride: String? = null,
+        bluetoothJsonOverride: String? = null
+    ) {
+        if (!isFixedSpoofingActive()) {
+            return
+        }
+
+        settingsRepository.lastSpoofedLat = lat.toString()
+        settingsRepository.lastSpoofedLng = lng.toString()
+
+        liveFixedLocationJob?.cancel()
+        liveFixedLocationJob = viewModelScope.launch {
+            if (wifiJsonOverride == null && cellJsonOverride == null && bluetoothJsonOverride == null) {
+                evaluateMockCapabilitiesSuspend(lat, lng)
+            }
+
+            val state = _uiState.value
+            val wifiJson = wifiJsonOverride ?: state.collectedWifiJson
+            val cellJson = cellJsonOverride ?: state.collectedCellJson
+            val bluetoothJson = bluetoothJsonOverride ?: state.collectedBluetoothJson
+            val now = System.currentTimeMillis()
+            locationRepository.updateConfig(
+                lat = lat,
+                lng = lng,
+                simMode = "STILL",
+                simBearing = state.simBearing,
+                startTime = now,
+                routePoints = emptyList(),
+                isRouteMode = false,
+                appCoordinateSystems = state.appCoordinateSystems,
+                wifiJson = wifiJson,
+                cellJson = cellJson,
+                bluetoothJson = bluetoothJson,
+                mockWifi = state.mockWifi && state.canMockWifi,
+                mockCell = state.mockCell,
+                mockBluetooth = state.mockBluetooth && state.canMockBluetooth,
+                enableJitter = state.enableJitter
+            )
         }
     }
 

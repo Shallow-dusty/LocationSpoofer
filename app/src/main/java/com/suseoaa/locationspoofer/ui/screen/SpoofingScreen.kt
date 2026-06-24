@@ -327,8 +327,7 @@ fun SpoofingScreen(
                                 .clickable {
                                     val pLat = poi.lat
                                     val pLng = poi.lng
-                                    viewModel.updateLatitude(String.format("%.6f", pLat))
-                                    viewModel.updateLongitude(String.format("%.6f", pLng))
+                                    viewModel.selectFixedLocation(pLat, pLng)
                                     smallMapRef?.animateCamera(pLat, pLng, 16f)
                                     showSearchResults = false
                                     searchQuery = poi.title
@@ -752,8 +751,14 @@ fun SpoofingScreen(
             isDark = isDark,
             onDismiss = { showCustomCoordDialog = false },
             onConfirm = { lat, lng ->
-                viewModel.updateLatitude(lat)
-                viewModel.updateLongitude(lng)
+                val parsedLat = lat.toDoubleOrNull()
+                val parsedLng = lng.toDoubleOrNull()
+                if (parsedLat != null && parsedLng != null) {
+                    viewModel.selectFixedLocation(parsedLat, parsedLng)
+                } else {
+                    viewModel.updateLatitude(lat)
+                    viewModel.updateLongitude(lng)
+                }
                 showCustomCoordDialog = false
             }
         )
