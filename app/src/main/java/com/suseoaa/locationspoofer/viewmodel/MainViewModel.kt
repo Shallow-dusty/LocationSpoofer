@@ -27,10 +27,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
@@ -78,6 +81,8 @@ class MainViewModel(
     private var autoRouteJob: Job? = null
     private var continuousScanJob: Job? = null
     private var liveFixedLocationJob: Job? = null
+    private val liveFixedLocationMutex = Mutex()
+    private val liveFixedLocationRequestId = AtomicLong(0)
 
     init {
         initialize()
@@ -1245,13 +1250,15 @@ class MainViewModel(
                 longitudeInput = String.format("%.6f", loc.lng),
                 collectedWifiJson = loc.wifiJson,
                 collectedCellJson = loc.cellJson,
+                collectedBluetoothJson = "[]",
                 wifiApCount = wifiCount,
                 wifiLoadStatus = if (wifiCount > 0) com.suseoaa.locationspoofer.data.model.WifiLoadStatus.DONE else com.suseoaa.locationspoofer.data.model.WifiLoadStatus.IDLE,
                 canMockWifi = wifiCount > 0,
-                canMockCell = cellCount > 0
+                canMockCell = cellCount > 0,
+                canMockBluetooth = false
             ) 
         }
-        syncLiveFixedLocation(loc.lat, loc.lng, loc.wifiJson, loc.cellJson, _uiState.value.collectedBluetoothJson)
+        syncLiveFixedLocation(loc.lat, loc.lng, loc.wifiJson, loc.cellJson, "[]")
     }
 
     fun removeSavedLocation(location: SavedLocation) {
@@ -1488,34 +1495,41 @@ class MainViewModel(
         settingsRepository.lastSpoofedLat = lat.toString()
         settingsRepository.lastSpoofedLng = lng.toString()
 
+        val requestId = liveFixedLocationRequestId.incrementAndGet()
         liveFixedLocationJob?.cancel()
         liveFixedLocationJob = viewModelScope.launch {
             if (wifiJsonOverride == null && cellJsonOverride == null && bluetoothJsonOverride == null) {
                 evaluateMockCapabilitiesSuspend(lat, lng)
             }
 
-            val state = _uiState.value
-            val wifiJson = wifiJsonOverride ?: state.collectedWifiJson
-            val cellJson = cellJsonOverride ?: state.collectedCellJson
-            val bluetoothJson = bluetoothJsonOverride ?: state.collectedBluetoothJson
-            val now = System.currentTimeMillis()
-            locationRepository.updateConfig(
-                lat = lat,
-                lng = lng,
-                simMode = "STILL",
-                simBearing = state.simBearing,
-                startTime = now,
-                routePoints = emptyList(),
-                isRouteMode = false,
-                appCoordinateSystems = state.appCoordinateSystems,
-                wifiJson = wifiJson,
-                cellJson = cellJson,
-                bluetoothJson = bluetoothJson,
-                mockWifi = state.mockWifi && state.canMockWifi,
-                mockCell = state.mockCell,
-                mockBluetooth = state.mockBluetooth && state.canMockBluetooth,
-                enableJitter = state.enableJitter
-            )
+            liveFixedLocationMutex.withLock {
+                if (requestId != liveFixedLocationRequestId.get() || !isFixedSpoofingActive()) {
+                    return@withLock
+                }
+
+                val state = _uiState.value
+                val wifiJson = wifiJsonOverride ?: state.collectedWifiJson
+                val cellJson = cellJsonOverride ?: state.collectedCellJson
+                val bluetoothJson = bluetoothJsonOverride ?: state.collectedBluetoothJson
+                val now = System.currentTimeMillis()
+                locationRepository.updateConfig(
+                    lat = lat,
+                    lng = lng,
+                    simMode = "STILL",
+                    simBearing = state.simBearing,
+                    startTime = now,
+                    routePoints = emptyList(),
+                    isRouteMode = false,
+                    appCoordinateSystems = state.appCoordinateSystems,
+                    wifiJson = wifiJson,
+                    cellJson = cellJson,
+                    bluetoothJson = bluetoothJson,
+                    mockWifi = state.mockWifi && state.canMockWifi,
+                    mockCell = state.mockCell,
+                    mockBluetooth = state.mockBluetooth && state.canMockBluetooth,
+                    enableJitter = state.enableJitter
+                )
+            }
         }
     }
 
