@@ -37,7 +37,7 @@ abstract class XC_MethodHook {
 }
 
 object XposedHelpers {
-    lateinit var module: XposedModule
+    lateinit var module: XposedInterface
 
     fun findClass(className: String, classLoader: ClassLoader?): Class<*> {
         return Class.forName(className, false, classLoader ?: ClassLoader.getSystemClassLoader())
@@ -235,7 +235,12 @@ object XposedBridge {
     }
 }
 
-class LocationHooker : XposedModule() {
+class LocationHooker() : XposedModule() {
+    constructor(module: XposedInterface, param: XposedModuleInterface.ModuleLoadedParam) : this() {
+        XposedHelpers.module = module
+        onModuleLoaded(param)
+    }
+
     init {
         XposedHelpers.module = this
     }
